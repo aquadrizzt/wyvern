@@ -3,9 +3,10 @@ import time
 import os 
 from os import path 
 import mmap 
-import matplotlib 
-import matplotlib.pyplot as plt 
 from wyvern import resources
+import sys 
+import pandas as pd 
+import gettext 
 
 ResourceTypeID = {
 	1 : 'BMP',
@@ -56,7 +57,7 @@ ResourceTypeID = {
 	4094 : 'MUS',
 	4095 : 'ACM',
 }
-			
+
 def read_key(key):
 	with open(key,"r+b") as f:
 		# HEADER
@@ -204,8 +205,52 @@ def read_bif(bif):
 		#print(dialog)
 	#print("Loaded:",bif)
 
-#t = time.time()
-#data = read_key('chitin.key')
+def read_tlk(tlk):
+	with open(tlk,"r+b") as f:
+		# HEADER
+		sigver = f.read(8).decode('ascii')
+		if sigver != 'TLK V1  ':
+			raise ValueError('Invalid TLK signature')
+		f.seek(8)
+		lang_id = unpack('H',f.read(2))[0]
+		#print(lang_id)
+		f.seek(10)
+		strcount = unpack('L',f.read(4))[0]
+		#print(strcount)
+		f.seek(14)
+		stroffset = unpack('L',f.read(4))[0]
+		#print((stroffset-0x12)/strcount)
+		entryoffset = 0x12		
+		tlk_entries = list()
+		for i in range(0,strcount):
+			offset = entryoffset + 0x1a * i
+			f.seek(offset)
+			bitfield = unpack('H',f.read(2))[0]
+			# Split bit field into 3 flags 
+			has_text = bool(bitfield & 1)
+			has_sound = bool((bitfield > 1) & 1)
+			has_token = bool((bitfield > 2) & 1)
+			f.seek(offset + 0x2)
+			# This removes trailing whitespace; be sure to return upon creation of final dialog.tlk. 
+			soundres = unpack('8s',f.read(8))[0].decode('ascii').rstrip('\0')
+			f.seek(offset + 0xa)
+			vol_variance = unpack('L',f.read(4))[0]
+			f.seek(offset + 0xe)
+			pitch_variance = unpack('L',f.read(4))[0]
+			f.seek(offset + 0x12)
+			stroffset_rel = unpack('L',f.read(4))[0]
+			f.seek(offset + 0x16)
+			str_length = unpack('L',f.read(4))[0]
+			f.seek(stroffset + stroffset_rel)
+			string = unpack(str(str_length)+'s',f.read(str_length))[0].decode('utf-8')
+
+			tlk_entries.append((string,soundres,vol_variance,pitch_variance,has_text,has_sound,has_token,stroffset_rel,str_length))
+			#print(resname,restype,bifindex,resindex)
+
+		string_table = pd.DataFrame(tlk_entries,columns=['String','SoundRes','Volume_Variance','Pitch_Variance','Text?','Sound?','Tokens?','Offset_Rel','Length'])
+
+		return string_table
+
 def save_to_override(name,data):
 	file = open(path.join(path.abspath(path.dirname(sys.argv[0])),'override',name),'wb')
 	file.write(data)
@@ -216,14 +261,22 @@ def get_resource_raw(resource):
 	return keydata.get(resource.upper())
 
 def get_resource(resource):
-	data = get_resource_raw(resource)
-	if data: 
+	location = locate_resource(resource)
+	
+	if location == 'keydata': 
+		data = get_resource_raw(resource)
+	elif location == 'override':
+		data = open(path.join(path.abspath(path.dirname(sys.argv[0])),'override',resource),'rb').read()
+	else: 
+		print('ERROR: {} not found.'.format(resource))
+		return None 
+	if data:
 		sig = data[:4].decode('ascii')
 		ver = float(data[5:8].decode('ascii'))
 		if sig == 'CRE ':
 			parsed = resources.CRE.CRE(resource,ver)
 		return parsed
-	else:
+	else: 
 		return None
 
 def locate_resource(resource):
@@ -241,11 +294,88 @@ def get_file(resource):
 		#print('File in override')
 		file = path.join(path.abspath(path.dirname(sys.argv[0])),'override',resource)
 	else:
-		#print('File not found')
+		print('ERROR: {} not found in /override/.'.format(resource))
 		file = None
-	#data = get_resource_raw(resource) 
 	return file
 
+def add_new_string(string,sound_res='',has_tokens=False,volume_variance=0,pitch_variance=0):
+	if string: 
+		has_text = True
+	else:
+		has_text = False
+	if sound_res: 
+		has_sound = True
+	else: 
+		has_sound = False 
+
+	global new_strings
+	new_strings = new_strings.append({'String': string,'SoundRes':sound_res,'Volume_Variance':volume_variance,'Pitch_Variance':pitch_variance,'Text?':has_text,'Sound?':has_sound,'Tokens?':has_tokens,'Offset_Rel':-1,'Length':len(string)},ignore_index=True)
+	# at some point, this should return the index for this string in new_tlk, so it can be used in functions, etc. 
+
+def get_string(strref):
+	return dialog_table.loc[strref,'String']
+
+def change_string(strref,string):
+	# This function allows you to change strings in the original dialog.tlk. 
+	# Use add_new_string() to add new strings and <table operations, for now> to change new strings. 
+	dialog_table.loc[strref,'String'] = string
+	dialog_table.loc[strref,'Length'] = len(string)
+
+def update_dialog_tlk():
+	# this should be run at the end of the installer 
+	# it does the following 
+	# 1) calculates the offsets for each new string 
+	# 2) merges the existing dialog table with the new strings 
+	# 3) writes to a byte file
+	# 4) saves to dialog.tlk location
+	#offset = dialog_table['Offset_Rel'].iloc[-1] + dialog_table['Length'].iloc[-1]
+	header_length = 0x12
+	new_tlk = pd.concat([dialog_table,new_strings],ignore_index=True)
 	
+	# This updates the offsets of every string based on length. 
+	new_tlk['Offset_Rel'] = (26*len(new_tlk)+header_length) + new_tlk.shift(periods=1).fillna(value=0)['Length'].astype(int).cumsum()
+	length = new_tlk['Offset_Rel'].iloc[-1] + new_tlk['Length'].iloc[-1]
+	dialog_bytes = bytearray(length)
+
+	# header
+	dialog_bytes[:8] = 'TLK V1  '.encode('ascii')
+	dialog_bytes[0x8:0xa] = (0).to_bytes(2,'little') # this will eventually update with lang_id from dialog.tlk
+	dialog_bytes[0xa:0xe] = len(new_tlk).to_bytes(4,'little')
+	dialog_bytes[0xe:0x12] = (26*len(new_tlk)+header_length).to_bytes(4,'little')
+	
+	for index, row in new_tlk.iterrows(): 
+		offset = header_length + 0x1a * index
+		dialog_bytes[offset:offset+0x2] = (4*row['Tokens?'] + 2*row['Sound?'] + 1*row['Text?']).to_bytes(2,'little')
+		dialog_bytes[offset+0x2:offset+0xa] = pack('8s', row['SoundRes'].encode('ascii'))
+		dialog_bytes[offset+0xa:offset+0xe] = int(row['Volume_Variance']).to_bytes(4,'little')
+		dialog_bytes[offset+0xe:offset+0x12] = int(row['Pitch_Variance']).to_bytes(4,'little')
+		dialog_bytes[offset+0x12:offset+0x16] = int(row['Offset_Rel']).to_bytes(4,'little')
+		dialog_bytes[offset+0x16:offset+0x1a] = int(row['Length']).to_bytes(4,'little')
+		dialog_bytes[(26*len(new_tlk)+header_length)+row['Offset_Rel']:(26*len(new_tlk)+header_length)+row['Offset_Rel']+row['Length']] = pack(str(row['Length'])+'s', row['String'].encode('utf-8'))
+
+	file = open(path.join(path.abspath(path.dirname(sys.argv[0])),'lang/en_US','dialog.tlk'),'wb')
+	file.write(dialog_bytes)
+	file.close()
+
+def backup_tlk_file(): 
+	# this will eventually allow the automatic saving of the original dialog.tlk file 
+	pass
+	
+def load_tlk_from_backup(): 
+	# this will allow the restoration of the backup for dialog.tlk file 
+	pass 
+
+
+
+# This sets up some important data objects for further access by functions. 
+# Read game data
 global keydata 
 keydata = read_key('chitin.key')
+
+# Read dialog.tlk 
+global dialog_table 
+dialog_table = read_tlk('lang/en_US/dialog.tlk')
+
+# Create new string table
+global new_strings 
+new_strings = pd.DataFrame(columns=['String','SoundRes','Volume_Variance','Pitch_Variance','Text?','Sound?','Tokens?','Offset_Rel','Length'])

@@ -22,47 +22,52 @@ class Resource:
 			self.data = None 
 			self.size = 0
 		
+	def update_data(self): 
+		raise NotImplementedError('All Resource objects must have this function.')
 
 	def save_as(self,name):
+		self.update_data()
 		file = open(os.path.join(os.path.abspath(os.path.dirname(sys.argv[0])),'override',name),'wb')
 		file.write(self.data)
 		file.close()
 
-	def read_ascii(self,offset,length=8):
+	# These functions do not play nice with the object.parameter methods. 
+	# Do not use them unless you know what you're doing and have good reason. 
+	def _read_ascii(self,offset,length=8):
 		# offset is a number (in decimal or 0x.. format)
 		return self.data[offset:offset+length].decode('ascii')
 
-	def write_ascii(self,offset,value,length=8):
+	def _write_ascii(self,offset,value,length=8):
 		# offset is a number (in decimal or 0x.. format)
 		data = bytearray(self.data)
 		data[offset:offset+length] = pack(str(length)+'s',value.encode('ascii'))
 		self.data = bytes(data)
 
-	def read_byte(self,offset,signed=False):
+	def _read_byte(self,offset,signed=False):
 		# offset is a number (in decimal or 0x.. format)
 		return int.from_bytes(self.data[offset:offset+1],'little',signed=signed)
 
-	def write_byte(self,offset,value):
+	def _write_byte(self,offset,value):
 		# offset is a number (in decimal or 0x.. format)
 		data = bytearray(self.data)
 		data[offset:offset+1] = value.to_bytes(1,'little')
 		self.data = bytes(data)
 
-	def read_short(self,offset,signed=False):
+	def _read_short(self,offset,signed=False):
 		# offset is a number (in decimal or 0x.. format)
 		return int.from_bytes(self.data[offset:offset+2],'little',signed=signed)
 
-	def write_short(self,offset,value):
+	def _write_short(self,offset,value):
 		# offset is a number (in decimal or 0x.. format)
 		data = bytearray(self.data)
 		data[offset:offset+2] = value.to_bytes(2,'little')
 		self.data = bytes(data)
 
-	def read_long(self,offset,signed=False):
+	def _read_long(self,offset,signed=False):
 		# offset is a number (in decimal or 0x.. format)
 		return int.from_bytes(self.data[offset:offset+4],'little',signed=signed)
 
-	def write_long(self,offset,value):
+	def _write_long(self,offset,value):
 		# offset is a number (in decimal or 0x.. format)
 		data = bytearray(self.data)
 		data[offset:offset+4] = value.to_bytes(4,'little')
